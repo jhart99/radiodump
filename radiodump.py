@@ -30,10 +30,8 @@ def compute_check(msg):
 
     """
 
-#    retval = 0
-#    for byte in msg:
-#        retval = retval ^ byte
-#    return retval
+    if len(msg) == 0:
+        return 0
     return functools.reduce(operator.xor, msg)
 
 def format_frame(message):
@@ -165,14 +163,17 @@ def magicwrite(sio, addr, msg, verbosity=0):
 
     precontent = bytes([0x05, 0x00, 0x00, 0x00, 0x00])
     sio.write(magicFrame(precontent))
+    if verbosity: eprint(">" + magicFrame(precontent).hex())
     sio.flush()
     time.sleep(0.07)
     sio.write(writeFrame(addr, msg))
+    if verbosity: eprint(">" + writeFrame(addr, msg).hex())
     sio.flush()
     time.sleep(0.07)
     data = waitonread(sio)
     postcontent = bytes([0x05, 0x00, 0x00, 0x00, 0xa5])
     sio.write(magicFrame(postcontent))
+    if verbosity: eprint(">" + magicFrame(postcontent).hex())
     sio.flush()
     time.sleep(0.07)
 
@@ -202,7 +203,6 @@ def readmem(sio, addr, verbosity=0, retries=25):
         if verbosity: eprint(">" + frame.hex())
         sio.write(frame)
         sio.flush()
-        # time.sleep(0.005)
         size = sio.in_waiting
         i = retries
         while size == 0 and i > 0:
@@ -231,7 +231,7 @@ class Frame:
     content = bytes([])
     def __init__(self, msg):
         msg = unescaper(msg)
-        if len(msg) < 4:
+        if len(msg) <= 4:
             if(msg == b'\x11\x13'):
                 self.ack = True
             else:
@@ -249,6 +249,10 @@ class Frame:
 
 
 def knock(sio, verbosity=0, retries=25):
+    """ Replays the initial knock sequence
+
+    This sequence and timing is from the CPS software capture.
+    """
     knock_worked = False
     while not knock_worked and retries > 0:
         sio.write(knockFrame())
@@ -266,35 +270,55 @@ def knock(sio, verbosity=0, retries=25):
         retries -= 1
     return knock_worked
 
-def burstRead(sio, begin, end, verbose=0, burst=16):
+def burstRead(sio, begin, end, verbosity=0, burst=16):
+    """ Burst several read commands and then parse them back out.
+
+    Several frames are sent without waiting for all of the replies to come back and then parsed in a bundle
+    """
     addr = begin
     offset = 1
+    sio.reset_input_buffer()
     while addr < end:
+        readbuffer = b''
         while offset < burst:
+            frame = readFrame(addr, offset)
             sio.write(readFrame(addr, offset))
             addr = addr + 4
             offset = offset + 1
-        sio.flush()
-        size = 0
-        countdown = 256
-        while size == 0 and countdown > 0:
             size = sio.in_waiting
-            countdown -= 1
-        if countdown == 0:
-            continue
-        data = sio.read(size)
-        sys.stdout.buffer.write(data[5:9])
-        addr = addr + 4
-        offset = (offset + 1) % 16
-        if (offset == 0):
-            offset = 1
+            if size > 0:
+                readbuffer += sio.read(size)
+        sio.flush()
+        time.sleep(0.001)
+        size = sio.in_waiting
+        if size > 0:
+            readbuffer += sio.read(size)
+        sys.stdout.buffer.write(bufferParser(readbuffer, burst))
+        offset = 1
     return 0
+
+def bufferParser(readbuffer, burst=16):
+    """ Parse concatenated frames from a burst
+
+
+    """
+    out = b''
+    offset = 1
+    while len(readbuffer) > 0:
+        length = readbuffer[2]
+        if readbuffer[4] == offset:
+            out += readbuffer[5:3+length]
+            offset += 1
+        readbuffer = readbuffer[4+length:]
+    return out
+
+
 
 def preamble(port='/dev/ttyUSB0', baudrate=921600, verbosity=0 ):
     """ Replay the preamble
 
     """
-    sio = serial.Serial(port, baudrate, timeout = 1)
+    sio = serial.Serial(port, baudrate, serial.EIGHTBITS, serial.PARITY_NONE, serial.STOPBITS_ONE, xonxoff=True, rtscts=False, timeout = 0.001)
     sio.flush()
     knock_worked = knock(sio, verbosity)
     if not knock_worked:
@@ -311,17 +335,17 @@ def preamble(port='/dev/ttyUSB0', baudrate=921600, verbosity=0 ):
     time.sleep(1.24)
 
     for x in range(0,25):
-        magicwrite(sio, magicaddr, bytes([0xaa, 0x06, 0x0a, 0x06, 0x0a, 0xbb, 0x00, 0x00]))
+        magicwrite(sio, magicaddr, bytes([0xaa, 0x06, 0x0a, 0x06, 0x0a, 0xbb, 0x00, 0x00]), verbosity)
 
     # without these, the header isn't there
     # clears the destination area
-    magicwrite(sio, magicaddr, bytes([0xaa, 0x07, 0x00, 0x2b, 0x00, 0x2c, 0xbb, 0x00, 0x00, 0x00]))
+    magicwrite(sio, magicaddr, bytes([0xaa, 0x07, 0x00, 0x2b, 0x00, 0x2c, 0xbb, 0x00, 0x00, 0x00]), verbosity)
     # purpose of this is unknown
-    magicwrite(sio, magicaddr, bytes([0xaa, 0x06, 0x0a, 0x07, 0x0b, 0xbb, 0x00, 0x00]))
+    magicwrite(sio, magicaddr, bytes([0xaa, 0x06, 0x0a, 0x07, 0x0b, 0xbb, 0x00, 0x00]), verbosity)
     # causes the red led to blink
-    magicwrite(sio, magicaddr, bytes([0xaa, 0x06, 0x0a, 0x03, 0x0f, 0xbb, 0x00, 0x00]))
+    magicwrite(sio, magicaddr, bytes([0xaa, 0x06, 0x0a, 0x03, 0x0f, 0xbb, 0x00, 0x00]), verbosity)
     # causes something to populate this header area
-    magicwrite(sio, magicaddr, bytes([0xaa, 0x06, 0x0a, 0x00, 0x0c, 0xbb, 0x00, 0x00]))
+    magicwrite(sio, magicaddr, bytes([0xaa, 0x06, 0x0a, 0x00, 0x0c, 0xbb, 0x00, 0x00]), verbosity)
     sio.close()
 
 def readMemRange(begin, end, port='/dev/ttyUSB0', baudrate=921600, verbosity=0 ):
@@ -329,7 +353,7 @@ def readMemRange(begin, end, port='/dev/ttyUSB0', baudrate=921600, verbosity=0 )
 
     """
 
-    sio = serial.Serial(port, baudrate, timeout = 1)
+    sio = serial.Serial(port, baudrate, serial.EIGHTBITS, serial.PARITY_NONE, serial.STOPBITS_ONE, xonxoff=True, rtscts=False, timeout = 0.001)
     sio.flush()
     addr = begin
     while addr < end:
@@ -347,24 +371,30 @@ def finalize(port='/dev/ttyUSB0', baudrate=921600, verbosity=0 ):
     sio.flush()
     magicdata = readmem(sio, 0x81c00270, verbosity)
     magicaddr = int.from_bytes(magicdata, 'little')
-    magicwrite(sio, magicaddr, bytes([0xaa, 0x06, 0x0a, 0x04, 0x08, 0xbb, 0x00, 0x00]))
-    magicwrite(sio, magicaddr, bytes([0xaa, 0x06, 0x0a, 0x07, 0x0b, 0xbb, 0x00, 0x00]))
+    magicwrite(sio, magicaddr, bytes([0xaa, 0x06, 0x0a, 0x04, 0x08, 0xbb, 0x00, 0x00]), verbosity)
+    magicwrite(sio, magicaddr, bytes([0xaa, 0x06, 0x0a, 0x07, 0x0b, 0xbb, 0x00, 0x00]), verbosity)
     sio.close()
 
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description='Auctus A6 dumper')
-    parser.add_argument('-V', '--version', action='version',
-        version='%(prog)s 0.0.1',
-        help='display version information and exit')
+    parser.add_argument('--begin', type=lambda x: int(x,0),
+                        help='begin address default 0x82000000',
+                        default=0x82000000)
+    parser.add_argument('--end', type=lambda x: int(x,0),
+                        help='end address default 0x8200ff00',
+                        default=0x82000000)
     parser.add_argument('-p', '--port', default='/dev/ttyUSB0',
-        type=str, help='serial port')
+                        type=str, help='serial port')
     parser.add_argument('-b','--baudrate', default=921600,
-        type=int, help='baud rate')
+                        type=int, help='baud rate')
     parser.add_argument('-v','--verbosity', default=0, action='count',
-        help='print frames to stderr')
+                        help='print sent and received frames to stderr for debugging')
+    parser.add_argument('-V', '--version', action='version',
+                        version='%(prog)s 0.0.1',
+                        help='display version information and exit')
     args = parser.parse_args()
     preamble(args.port, args.baudrate, args.verbosity)
-    readMemRange(0x82006584,0x8200ad74, args.port, args.baudrate, args.verbosity)
+    readMemRange(args.begin, args.end, args.port, args.baudrate, args.verbosity)
     finalize()
