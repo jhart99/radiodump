@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 """Player for general text log files."""
 
 import serial
@@ -384,7 +384,7 @@ if __name__ == "__main__":
                         default=0x82000000)
     parser.add_argument('--end', type=lambda x: int(x,0),
                         help='end address default 0x8200ff00',
-                        default=0x82000000)
+                        default=0x8200ff00)
     parser.add_argument('-p', '--port', default='/dev/ttyUSB0',
                         type=str, help='serial port')
     parser.add_argument('-b','--baudrate', default=921600,
@@ -397,4 +397,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
     preamble(args.port, args.baudrate, args.verbosity)
     readMemRange(args.begin, args.end, args.port, args.baudrate, args.verbosity)
-    finalize()
+    finalize(args.port, args.baudrate, args.verbosity)
