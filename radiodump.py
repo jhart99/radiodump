@@ -314,12 +314,10 @@ def bufferParser(readbuffer, burst=16):
 
 
 
-def preamble(port='/dev/ttyUSB0', baudrate=921600, verbosity=0 ):
+def preamble(sio, verbosity=0 ):
     """ Replay the preamble
 
     """
-    sio = serial.Serial(port, baudrate, serial.EIGHTBITS, serial.PARITY_NONE, serial.STOPBITS_ONE, xonxoff=True, rtscts=False, timeout = 0.001)
-    sio.flush()
     knock_worked = knock(sio, verbosity)
     if not knock_worked:
         eprint("Serial communication failed")
@@ -330,8 +328,7 @@ def preamble(port='/dev/ttyUSB0', baudrate=921600, verbosity=0 ):
         content = bytes([0x03, 0x00, 0x00, 0x00, 0x80])
         magiccommand(sio, content, verbosity)
     # find the magic address for the following writes
-    magicdata = readmem(sio, 0x81c00270, verbosity)
-    magicaddr = int.from_bytes(magicdata, 'little')
+    magicaddr = fetchWord(sio, 0x81c00270, verbosity)
     time.sleep(1.24)
 
     for x in range(0,25):
@@ -346,34 +343,52 @@ def preamble(port='/dev/ttyUSB0', baudrate=921600, verbosity=0 ):
     magicwrite(sio, magicaddr, bytes([0xaa, 0x06, 0x0a, 0x03, 0x0f, 0xbb, 0x00, 0x00]), verbosity)
     # causes something to populate this header area
     magicwrite(sio, magicaddr, bytes([0xaa, 0x06, 0x0a, 0x00, 0x0c, 0xbb, 0x00, 0x00]), verbosity)
-    sio.close()
 
-def readMemRange(begin, end, port='/dev/ttyUSB0', baudrate=921600, verbosity=0 ):
+def fetchWord(sio, addr, verbosity=0):
+    pointer = readmem(sio, addr, verbosity)
+    return int.from_bytes(pointer, 'little')
+
+def readCodeplug(sio, verbosity=0 ):
+    # Make a note of the last time we sent a magic command
+    last_magic_write = time.time()
+    magicaddr = fetchWord(sio, 0x81c00270, verbosity)
+
+    # fetch codeplug location
+    cpsPointerPointer = fetchWord(sio, 0x81c00268, verbosity)
+    cpsHeaderPointer = fetchWord(sio, cpsPointerPointer, verbosity)
+    cpsHeaderLength = fetchWord(sio, cpsPointerPointer + 4, verbosity)
+    cpsDataPointer = fetchWord(sio, cpsPointerPointer + 8, verbosity)
+    cpsDataLength = fetchWord(sio, cpsHeaderPointer + 0x14, verbosity) - cpsHeaderLength
+
+    readMemRange(sio, cpsHeaderPointer, cpsHeaderPointer+cpsHeaderLength, verbosity)
+    readMemRange(sio, cpsDataPointer, cpsDataPointer+cpsDataLength, verbosity)
+
+def readMemRange(sio, begin, end, verbosity=0 ):
     """ Read a memory range
 
     """
+    # Make a note of the last time we sent a magic command
+    last_magic_write = time.time()
+    magicaddr = fetchWord(sio, 0x81c00270, verbosity)
 
-    sio = serial.Serial(port, baudrate, serial.EIGHTBITS, serial.PARITY_NONE, serial.STOPBITS_ONE, xonxoff=True, rtscts=False, timeout = 0.001)
-    sio.flush()
     addr = begin
     while addr < end:
         data = readmem(sio, addr, verbosity)
         if len(data) == 4:
             sys.stdout.buffer.write(data)
             addr = addr + 4
-    sio.close()
+        cur_time = time.time()
+        if (cur_time - last_magic_write - 5) > 0:
+            magicwrite(sio, magicaddr, bytes([0xaa, 0x06, 0x0a, 0x00, 0x0c, 0xbb, 0x00, 0x00]), verbosity)
+            last_magic_write = cur_time
 
-def finalize(port='/dev/ttyUSB0', baudrate=921600, verbosity=0 ):
+def finalize(sio, verbosity=0 ):
     """ The Read finalize command
 
     """
-    sio = serial.Serial(port, baudrate, timeout = 1)
-    sio.flush()
-    magicdata = readmem(sio, 0x81c00270, verbosity)
-    magicaddr = int.from_bytes(magicdata, 'little')
+    magicaddr = fetchWord(sio, 0x81c00270, verbosity)
     magicwrite(sio, magicaddr, bytes([0xaa, 0x06, 0x0a, 0x04, 0x08, 0xbb, 0x00, 0x00]), verbosity)
     magicwrite(sio, magicaddr, bytes([0xaa, 0x06, 0x0a, 0x07, 0x0b, 0xbb, 0x00, 0x00]), verbosity)
-    sio.close()
 
 
 if __name__ == "__main__":
@@ -389,12 +404,20 @@ if __name__ == "__main__":
                         type=str, help='serial port')
     parser.add_argument('-b','--baudrate', default=921600,
                         type=int, help='baud rate')
+    parser.add_argument('-c','--codeplug', action='store_true',
+                        help='Read the codeplug only')
     parser.add_argument('-v','--verbosity', default=0, action='count',
                         help='print sent and received frames to stderr for debugging')
     parser.add_argument('-V', '--version', action='version',
                         version='%(prog)s 0.0.1',
                         help='display version information and exit')
     args = parser.parse_args()
-    preamble(args.port, args.baudrate, args.verbosity)
-    readMemRange(args.begin, args.end, args.port, args.baudrate, args.verbosity)
-    finalize(args.port, args.baudrate, args.verbosity)
+    sio = serial.Serial(args.port, args.baudrate, serial.EIGHTBITS, serial.PARITY_NONE, serial.STOPBITS_ONE, xonxoff=True, rtscts=False, timeout = 0.001)
+    sio.flush()
+    preamble(sio, args.verbosity)
+    if args.codeplug:
+        readCodeplug(sio, args.verbosity)
+    else:
+        readMemRange(sio, args.begin, args.end, args.verbosity)
+    finalize(sio, args.verbosity)
+    sio.close()
