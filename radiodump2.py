@@ -186,17 +186,21 @@ class MemoryReader(asyncio.Protocol):
         begin = self.buf.find(0xad)
         while (begin >= 0):
             if len(self.buf) < begin + 3:
-                break
+                # too short frame, fragmented
+                return
             msglen = int.from_bytes(self.buf[begin+1:begin+3], byteorder = 'big', signed = False)
             endframe = begin + 4 + msglen
             if len(self.buf) < endframe:
-                break
+                # frame incomplete, fragmented
+                return
             # eprint(self.buf[begin:endframe].hex())
             seq = self.buf[begin+4] - 1
-            msg = self.buf[begin+3:begin+9]
-            if seq < self.burstLen and compute_check(msg) == self.buf[begin+9]:
-                self.received[seq] = True # offset by 1 for zero index
-                self.outputbuf[4*seq:4*seq+4] = self.buf[begin+5:begin+9]
+            if seq >= 0:
+                # if we have a negative seq it is an event and NOT a read
+                msg = self.buf[begin+3:begin+9]
+                if seq < self.burstLen and compute_check(msg) == self.buf[begin+9]:
+                    self.received[seq] = True # offset by 1 for zero index
+                    self.outputbuf[4*seq:4*seq+4] = self.buf[begin+5:begin+9]
             self.buf = self.buf[endframe:]
             begin = self.buf.find(0xad)
 
