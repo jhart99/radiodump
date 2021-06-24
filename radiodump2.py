@@ -141,6 +141,7 @@ class MemoryReader(asyncio.Protocol):
         self.start = start
         self.end = end
         self.f = future
+        self.memoryData = []
 
     def connection_made(self, transport):
         """Store the serial transport and schedule the task to send data.
@@ -154,7 +155,7 @@ class MemoryReader(asyncio.Protocol):
         self.transport.set_write_buffer_limits(128, 16)
         self.buf = bytes()
         self.msgs_recvd = 0
-        loop.create_task(self.readmem(self.start, self.end))
+        asyncio.get_running_loop().create_task(self.readmem(self.start, self.end))
         eprint('MemoryReader.send() scheduled')
 
     def connection_lost(self, exc):
@@ -164,7 +165,7 @@ class MemoryReader(asyncio.Protocol):
         eprint('MemoryReader closed')
         eprint('Reader closed')
         if not self.f.done():
-            self.f.set_result(True)
+            self.f.set_result(b''.join(self.memoryData))
         super().connection_lost(exc)
 
     def data_received(self, data):
@@ -233,13 +234,55 @@ class MemoryReader(asyncio.Protocol):
                         toot += 1
             await asyncio.sleep(0.001)
             eprint('block complete {}'.format(hex(burstBegin)))
-            sys.stdout.buffer.write(self.outputbuf)
-            sys.stdout.flush()
+            # sys.stdout.buffer.write(self.outputbuf)
+            # sys.stdout.flush()
+            self.memoryData.append(self.outputbuf)
             burstBegin += 4*self.burstLen
             await asyncio.sleep(0.001)
-        sys.stdout.buffer.flush()
-        self.transport.close()
+        if not self.f.done():
+            self.f.set_result(b''.join(self.memoryData))
+        # self.transport.close()
 
+
+async def main(args):
+    loop = asyncio.get_running_loop()
+    readMemory = loop.create_future()
+    readMemory2 = loop.create_future()
+
+    writer_factory = functools.partial(
+        MemoryReader,
+        start = 0x82000000,
+        end = 0x82001000,
+        future = readMemory)
+
+    writer_factory2 = functools.partial(
+        MemoryReader,
+        start = args.begin,
+        end = args.end,
+        future = readMemory2)
+
+    serial_port = serial.serial_for_url( args.port, args.baudrate,
+                                                     serial.EIGHTBITS,
+                                                     serial.PARITY_NONE,
+                                                     serial.STOPBITS_ONE,
+                                                     xonxoff=True,
+                                                     rtscts=False,
+                                                     timeout = 0.001)
+
+
+    writer = serial_asyncio.connection_for_serial(loop, writer_factory, serial_port)
+    #eprint('MemoryReader scheduled')
+    writerTask = loop.create_task(writer)
+    await readMemory
+    writerTask.cancel()
+    writer2 = serial_asyncio.connection_for_serial(loop, writer_factory2, serial_port)
+    writer2Task = loop.create_task(writer2)
+    await readMemory2
+    writer2Task.cancel()
+    output = open(args.out, "wb")
+    output.write(readMemory.result())
+    output.flush()
+    output.close()
 
 if __name__ == "__main__":
     import argparse
@@ -250,6 +293,8 @@ if __name__ == "__main__":
     parser.add_argument('--end', type=lambda x: int(x,0),
                         help='end address default 0x8200ff00',
                         default=0x8200ff00)
+    parser.add_argument('-o', '--out', default='/dev/stdout',
+                        type=str, help='output data to')
     parser.add_argument('-p', '--port', default='/dev/ttyUSB0',
                         type=str, help='serial port')
     parser.add_argument('-b','--baudrate', default=921600,
@@ -262,27 +307,4 @@ if __name__ == "__main__":
                         version='%(prog)s 0.0.1',
                         help='display version information and exit')
     args = parser.parse_args()
-
-    loop = asyncio.get_event_loop()
-    client_completed = asyncio.Future()
-
-    writer_factory = functools.partial(
-        MemoryReader,
-        start =  args.begin,
-        end = args.end,
-        future = client_completed)
-
-    writer = serial_asyncio.create_serial_connection(loop, writer_factory,
-                                                     args.port,
-                                                     args.baudrate,
-                                                     serial.EIGHTBITS,
-                                                     serial.PARITY_NONE,
-                                                     serial.STOPBITS_ONE,
-                                                     xonxoff=True,
-                                                     rtscts=False,
-                                                     timeout = 0.001)
-    # loop.create_task(writer)
-    #eprint('MemoryReader scheduled')
-    loop.run_until_complete(writer)
-    loop.run_until_complete(client_completed)
-    loop.close()
+    asyncio.run(main(args))
