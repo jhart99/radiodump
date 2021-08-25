@@ -21,115 +21,185 @@ def eprint(*args, **kwargs):
 
     print(*args, file=sys.stderr, **kwargs)
 
-def compute_check(msg):
-    """ Compute the check value for a message
 
-    AUCTUS messages use a check byte which is simply the XOR of all
-    the values of the message.
 
-    """
 
-    if len(msg) == 0:
-        return 0
-    return functools.reduce(operator.xor, msg)
+class CoolProtocol(asyncio.Protocol):
 
-def format_frame(message):
-    """ Format a raw message into a frame
+    def __init__(self):
+        """ Constructor
+        start and end are the memory range desired
+        Future is the future object signaling the thread has completed.
 
-    AUCTUS frames are of the form AD 00 XX FF ...message... YY
-    where XX is the length of the message and YY is the check byte
-    Additionally certain bytes in the message are escaped.
+        """
+        super().__init__()
 
-    """
+    def connection_made(self, transport):
+        """Store the serial transport and schedule the task to send data.
+        """
+        # eprint('CoolProtocol connection created')
+        self.transport = transport
+        self.transport.set_write_buffer_limits(128, 16)
+        self.buf = bytes()
+        self.messages = []
 
-    header = bytes([0xad, 0x00])
-    begin = bytes([0xff])
-    msg = begin + message
-    msglen = bytes([len(msg)])
-    check = bytes([compute_check(msg)])
-    return escaper(header + msglen + msg + check)
+    def connection_lost(self, exc):
+        """Connection closed
+        Needed to set the future flag showing this thread is complete
+        """
+        # eprint('CoolProtocol connection lost')
+        super().connection_lost(exc)
 
-def readFrame(addr, seq = 1):
-    """ make a frame to read a word at a memory address
+    def data_received(self, data):
+        """Store received data and process buffer to look for frames
 
-    this function creates a frame to read the memory from the device
-    suitable for serial transmission.
+        if the current read block is finished. Set the complete
+        semaphore if appropriate
+        """
+        # eprint(data.hex())
+        self.buf += data
+        self.buf = self.unescaper(self.buf)
+        # eprint(self.buf.hex())
+        self.process_buffer()
 
-    """
+    def process_buffer(self):
+        """ Process in the read buffer
 
-    command = 0x02
-    msg = struct.pack('<BIB', command, addr, seq)
-    return format_frame(msg)
+        scans for ad begin words and discards defective packets automatically
+        """
+        if len(self.buf) > 1024:
+            self.buf = bytes()
+        begin = self.buf.find(0xad)
+        while (begin >= 0):
+            if len(self.buf) < begin + 3:
+                # too short to read msg length, fragmented
+                return
+            msglen = int.from_bytes(self.buf[begin+1:begin+3], byteorder = 'big', signed = False)
+            nextframe = begin + 4 + msglen
+            if len(self.buf) < nextframe - 1:
+                # frame incomplete, fragmented
+                return
+            frame = self.buf[begin:nextframe]
+            # eprint(self.buf[begin:nextframe].hex())
+            msg = frame[3:-1]
+            if self.compute_check(msg) == frame[-1]:
+                self.message_handler(msg)
+            self.buf = self.buf[nextframe:]
+            begin = self.buf.find(0xad)
 
-def magicFrame(content):
-    """ make a frame containing magic(an unknown command)
+    def message_handler(self, message):
+        # eprint('CoolProtocol Message Handler')
+        self.messages.append(msg)
 
-    this function creates a frame to do some device magic and these
-    frames are used in the preamble and finalizer commands.
+    def escaper(self, msg):
+        """ escape message
 
-    """
+        this function escapes special characters in the message.  These
+        are 0x5c, 0x11 and 0x13 which are '\' and XON and XOFF characters.
 
-    command = bytes([0x84])
-    msg = command + content
-    return format_frame(msg)
+        """
 
-def writeFrame(addr, content):
-    """ make a frame containing a write command
+        out = bytes(sum([[0x5c, 0x5c ^ x ^ 0xa3] if x in [0x11, 0x13, 0x5c] else [x] for x in msg], []))
+        return out
 
-    this function creates a frame to do write a multiple byte content
-    at a specific memory address.  The length need not be a word, but
-    could be 16 bytes or more.
+    def unescaper(self, msg):
+        """ unescape message
 
-    """
+        this function undoes any escape sequences in a received message
+        """
 
-    command = bytes([0x83])
-    addr = struct.pack('<I', addr)
-    msg = command + addr + content
-    return format_frame(msg)
+        out = []
+        escape = False
+        for x in msg:
+            if x == 0x5c:
+                escape = True
+                continue
+            if escape:
+                x = 0x5c ^ x ^ 0xa3
+                escape = False
+            out.append(x)
+        return bytes(out)
 
-def knockFrame():
-    """ make a frame containing a knock command
+    def compute_check(self, msg):
+        """ Compute the check value for a message
 
-    this function creates a frame that I assume wakes up the device
-    for further commands.
+        AUCTUS messages use a check byte which is simply the XOR of all
+        the values of the message.
 
-    """
+        """
 
-    command = bytes([0x04])
-    content = bytes([0x03, 0x00, 0x00, 0x00, 0x01])
-    msg = command + content
-    return format_frame(msg)
+        if len(msg) == 0:
+            return 0
+        return functools.reduce(operator.xor, msg)
 
-def escaper(msg):
-    """ escape message
+    def format_frame(self, message):
+        """ Format a raw message into a frame
 
-    this function escapes special characters in the message.  These
-    are 0x5c, 0x11 and 0x13 which are '\' and XON and XOFF characters.
+        AUCTUS frames are of the form AD 00 XX FF ...message... YY
+        where XX is the length of the message and YY is the check byte
+        Additionally certain bytes in the message are escaped.
 
-    """
+        """
 
-    out = bytes(sum([[0x5c, 0x5c ^ x ^ 0xa3] if x in [0x11, 0x13, 0x5c] else [x] for x in msg], []))
-    return out
+        header = bytes([0xad, 0x00])
+        begin = bytes([0xff])
+        msg = begin + message
+        msglen = bytes([len(msg)])
+        check = bytes([self.compute_check(msg)])
+        return self.escaper(header + msglen + msg + check)
 
-def unescaper(msg):
-    """ unescape message
+    def read_frame(self, addr, seq = 1):
+        """ make a frame to read a word at a memory address
 
-    this function undoes any escape sequences in a received message
-    """
+        this function creates a frame to read the memory from the device
+        suitable for serial transmission.
 
-    out = []
-    escape = False
-    for x in msg:
-        if x == 0x5c:
-            escape = True
-            continue
-        if escape:
-            x = 0x5c ^ x ^ 0xa3
-            escape = False
-        out.append(x)
-    return bytes(out)
+        """
 
-class MemoryReader(asyncio.Protocol):
+        command = 0x02
+        msg = struct.pack('<BIB', command, addr, seq)
+        return self.format_frame(msg)
+
+    def magic_frame(self, content):
+        """ make a frame containing magic(an unknown command)
+
+        this function creates a frame to do some device magic and these
+        frames are used in the preamble and finalizer commands.
+
+        """
+
+        command = bytes([0x84])
+        msg = command + content
+        return format_frame(msg)
+
+    def write_frame(self, addr, content):
+        """ make a frame containing a write command
+
+        this function creates a frame to do write a multiple byte content
+        at a specific memory address.  The length need not be a word, but
+        could be 16 bytes or more.
+
+        """
+
+        command = bytes([0x83])
+        addr = struct.pack('<I', addr)
+        msg = command + addr + content
+        return format_frame(msg)
+
+    def knock_frame(self):
+        """ make a frame containing a knock command
+
+        this function creates a frame that I assume wakes up the device
+        for further commands.
+
+        """
+
+        command = bytes([0x04])
+        content = bytes([0x03, 0x00, 0x00, 0x00, 0x01])
+        msg = command + content
+        return format_frame(msg)
+
+class MemoryReader(CoolProtocol):
 
     def __init__(self, start, end, future):
         """ Constructor
@@ -146,64 +216,36 @@ class MemoryReader(asyncio.Protocol):
     def connection_made(self, transport):
         """Store the serial transport and schedule the task to send data.
         """
-        #eprint('MemoryReader connection created')
+        # eprint('MemoryReader connection created')
+        super().connection_made(transport)
         self.burstLen = 0x80
         self.received = [False]*self.burstLen
         self.outputbuf = bytearray(4*self.burstLen)
         self.complete = False
-        self.transport = transport
-        self.transport.set_write_buffer_limits(128, 16)
-        self.buf = bytes()
-        self.msgs_recvd = 0
         asyncio.get_running_loop().create_task(self.readmem(self.start, self.end))
-        eprint('MemoryReader.send() scheduled')
+        # eprint('MemoryReader.send() scheduled')
 
     def connection_lost(self, exc):
         """Connection closed
         Needed to set the future flag showing this thread is complete
         """
-        eprint('MemoryReader closed')
-        eprint('Reader closed')
+        # eprint('MemoryReader closed')
         if not self.f.done():
             self.f.set_result(b''.join(self.memoryData))
         super().connection_lost(exc)
 
-    def data_received(self, data):
-        """Store received data and process buffer to look for frames
 
-        if the current read block is finished. Set the complete
-        semaphore if appropriate
-        """
-        self.buf += data
-        self.process_buffer()
-        self.complete = sum(self.received) == len(self.received)
-
-    def process_buffer(self):
-        """ Process in the read buffer
-
-        scans for ad begin words and discards defective packets automatically
-        """
-        self.buf = unescaper(self.buf)
-        begin = self.buf.find(0xad)
-        while (begin >= 0):
-            if len(self.buf) < begin + 3:
-                # too short frame, fragmented
-                return
-            msglen = int.from_bytes(self.buf[begin+1:begin+3], byteorder = 'big', signed = False)
-            endframe = begin + 4 + msglen
-            if len(self.buf) < endframe:
-                # frame incomplete, fragmented
-                return
-            # eprint(self.buf[begin:endframe].hex())
-            seq = self.buf[begin+4] - 1
-            if seq >= 0:
-                # if we have a negative seq it is an event and NOT a read
-                msg = self.buf[begin+3:begin+9]
-                if seq < self.burstLen and compute_check(msg) == self.buf[begin+9]:
+    def message_handler(self, message):
+        # eprint(message.hex())
+        if len(message) != 6:
+            return
+        seq = message[1] - 1
+        if seq >= 0:
+            # this is an event so discard
+            if seq < self.burstLen:
                     self.received[seq] = True # offset by 1 for zero index
-                    self.outputbuf[4*seq:4*seq+4] = self.buf[begin+5:begin+9]
-            self.buf = self.buf[endframe:]
-            begin = self.buf.find(0xad)
+                    self.outputbuf[4*seq:4*seq+4] = message[2:]
+        self.complete = self.burstLen == sum(self.received)
 
     async def readmem(self, start, stop):
         """ Read a range of memory locations from start to stop
@@ -226,13 +268,13 @@ class MemoryReader(asyncio.Protocol):
                 for seq, read in enumerate(self.received):
                     if not read:
                         cur = burstBegin + 4 * seq
-                        message = readFrame(cur, seq + 1)
+                        message = self.read_frame(cur, seq + 1)
                         self.transport.serial.write(message)
-                        #eprint(f'MemoryReader sent: {message.hex()}')
+                        # eprint(f'MemoryReader sent: {message.hex()}')
                         if toot % 16 == 0:
                             await asyncio.sleep(0.001)
                         toot += 1
-            await asyncio.sleep(0.001)
+                await asyncio.sleep(0.001)
             eprint('block complete {}'.format(hex(burstBegin)))
             # sys.stdout.buffer.write(self.outputbuf)
             # sys.stdout.flush()
@@ -243,11 +285,70 @@ class MemoryReader(asyncio.Protocol):
             self.f.set_result(b''.join(self.memoryData))
         # self.transport.close()
 
+class CPSReader(MemoryReader):
+
+    def __init__(self, future):
+        """ Constructor
+        start and end are the memory range desired
+        Future is the future object signaling the thread has completed.
+
+        """
+        self.CPSData = []
+        self.f = future
+        self.knock_worked = False
+
+    def connection_made(self, transport):
+        """Store the serial transport and schedule the task to send data.
+        """
+        eprint('CPSReader connection created')
+        self.burstLen = 0x80
+        self.received = [False]*self.burstLen
+        self.outputbuf = bytearray(4*self.burstLen)
+        self.complete = False
+        self.loop = asyncio.get_running_loop()
+        self.loop.create_task(self.preamble())
+        eprint('CPRReader.preamble() scheduled')
+
+    def connection_lost(self, exc):
+        """Connection closed
+        Needed to set the future flag showing this thread is complete
+        """
+        # eprint('MemoryReader closed')
+        if not self.f.done():
+            self.f.set_result(b''.join(self.memoryData))
+        super().connection_lost(exc)
+
+    async def preamble(self):
+        while not self.knock_worked:
+            self.transport.write(self.knock_frame())
+            await asyncio.sleep(0.001)
+        eprint("knock worked")
+
+
+    def message_handler(self, message):
+        eprint(message.hex())
+        if len(message) == 3:
+            self.knock_worked = True
+        if len(message) != 6:
+            return
+        seq = message[1] - 1
+        if seq >= 0:
+            # this is an event so discard
+            if seq < self.burstLen:
+                    self.received[seq] = True # offset by 1 for zero index
+                    self.outputbuf[4*seq:4*seq+4] = message[2:]
+        self.complete = self.burstLen == sum(self.received)
+
 
 async def main(args):
     loop = asyncio.get_running_loop()
     readMemory = loop.create_future()
     readMemory2 = loop.create_future()
+    cps = loop.create_future()
+
+    cps_factory = functools.partial(
+        CPSReader,
+        future = cps)
 
     writer_factory = functools.partial(
         MemoryReader,
@@ -270,17 +371,22 @@ async def main(args):
                                                      timeout = 0.001)
 
 
-    writer = serial_asyncio.connection_for_serial(loop, writer_factory, serial_port)
+    # cpscoro = serial_asyncio.connection_for_serial(loop, cps_factory, serial_port)
+    #eprint('preamble scheduled')
+    #cpsTask = loop.create_task(cpscoro)
+    #await cps
+
+    #writer = serial_asyncio.connection_for_serial(loop, writer_factory, serial_port)
     #eprint('MemoryReader scheduled')
-    writerTask = loop.create_task(writer)
-    await readMemory
-    writerTask.cancel()
+    #writerTask = loop.create_task(writer)
+    #await readMemory
+    #writerTask.cancel()
     writer2 = serial_asyncio.connection_for_serial(loop, writer_factory2, serial_port)
     writer2Task = loop.create_task(writer2)
     await readMemory2
     writer2Task.cancel()
     output = open(args.out, "wb")
-    output.write(readMemory.result())
+    output.write(readMemory2.result())
     output.flush()
     output.close()
 
