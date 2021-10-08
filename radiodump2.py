@@ -83,6 +83,7 @@ class CoolProtocol(asyncio.Protocol):
             # eprint(self.buf[begin:nextframe].hex())
             msg = frame[3:-1]
             if self.compute_check(msg) == frame[-1]:
+                # only process the message if the check field matches
                 self.message_handler(msg)
             self.buf = self.buf[nextframe:]
             begin = self.buf.find(0xad)
@@ -218,7 +219,7 @@ class MemoryReader(CoolProtocol):
         """
         # eprint('MemoryReader connection created')
         super().connection_made(transport)
-        self.burstLen = 0x80
+        self.burstLen = 0x40
         self.received = [False]*self.burstLen
         self.outputbuf = bytearray(4*self.burstLen)
         self.complete = False
@@ -239,24 +240,27 @@ class MemoryReader(CoolProtocol):
         # eprint(message.hex())
         if len(message) != 6:
             return
-        seq = message[1] - 1
-        if seq >= 0:
-            # this is an event so discard
-            if seq < self.burstLen:
-                    self.received[seq] = True # offset by 1 for zero index
-                    self.outputbuf[4*seq:4*seq+4] = message[2:]
+        seq = message[1] - 1 - self.offset
+        if seq < 0:
+            return
+        if seq >= self.burstLen:
+            return
+        self.received[seq] = True # offset by 1 for zero index
+        self.outputbuf[4*seq:4*seq+4] = message[2:]
         self.complete = self.burstLen == sum(self.received)
 
     async def readmem(self, start, stop):
         """ Read a range of memory locations from start to stop
         """
         burstBegin = start
+        self.offset = 0x0
         while burstBegin < stop:
-            if stop - burstBegin < 4*0x80:
+            # because of issues with late packets coming back from the radio, we switch between two different subsets of values for sequences.
+            if stop - burstBegin < 4*0x40:
                 # need an integer divide by 4 to find the number of words left
                 self.burstLen = (stop - burstBegin) >> 2
             else:
-                self.burstLen = 0x80
+                self.burstLen = 0x40
 
             seq = 1
             toot = 0
@@ -266,21 +270,28 @@ class MemoryReader(CoolProtocol):
             self.complete = False
             while not self.complete:
                 for seq, read in enumerate(self.received):
+                    if self.complete:
+                        break
                     if not read:
                         cur = burstBegin + 4 * seq
-                        message = self.read_frame(cur, seq + 1)
+                        message = self.read_frame(cur, seq + 1 + self.offset)
                         self.transport.serial.write(message)
                         # eprint(f'MemoryReader sent: {message.hex()}')
-                        if toot % 16 == 0:
+                        if toot % 8 == 0:
                             await asyncio.sleep(0.001)
                         toot += 1
                 await asyncio.sleep(0.001)
             eprint('block complete {}'.format(hex(burstBegin)))
-            # sys.stdout.buffer.write(self.outputbuf)
-            # sys.stdout.flush()
             self.memoryData.append(self.outputbuf)
             burstBegin += 4*self.burstLen
+            # This pause here is to make sure that all messages from
+            # the current block arrive after we are complete
             await asyncio.sleep(0.001)
+            # alternate the offset so we can reject old packets
+            if self.offset == 0x0:
+                self.offset = 0x40
+            else:
+                self.offset = 0x0
         if not self.f.done():
             self.f.set_result(b''.join(self.memoryData))
         # self.transport.close()
@@ -326,14 +337,14 @@ class CPSReader(MemoryReader):
 
 
     def message_handler(self, message):
-        eprint(message.hex())
+        # eprint(message.hex())
         if len(message) == 3:
             self.knock_worked = True
         if len(message) != 6:
             return
         seq = message[1] - 1
-        if seq >= 0:
-            # this is an event so discard
+        if seq >= 0 and not self.complete:
+            # if less than zero, it is an event
             if seq < self.burstLen:
                     self.received[seq] = True # offset by 1 for zero index
                     self.outputbuf[4*seq:4*seq+4] = message[2:]
