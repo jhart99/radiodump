@@ -277,8 +277,8 @@ class MemoryReader(CoolProtocol):
                         message = self.read_frame(cur, seq + 1 + self.offset)
                         self.transport.serial.write(message)
                         # eprint(f'MemoryReader sent: {message.hex()}')
-                        if toot % 8 == 0:
-                            await asyncio.sleep(0.001)
+                        if toot % 16 == 0:
+                           await asyncio.sleep(0.0001)
                         toot += 1
                 await asyncio.sleep(0.001)
             eprint('block complete {}'.format(hex(burstBegin)))
