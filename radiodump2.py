@@ -396,13 +396,16 @@ async def main(args):
     writer2Task = loop.create_task(writer2)
     await readMemory2
     writer2Task.cancel()
-    output = open(args.out, "wb")
-    output.write(readMemory2.result())
-    output.flush()
-    output.close()
+    if args.out == "/dev/stdout":
+        output = sys.stdout.buffer
+        output.write(readMemory2.result())
+    else:
+        with open(args.out, 'wb') as f:
+            f.write(readMemory2.result())
 
 if __name__ == "__main__":
     import argparse
+        
     parser = argparse.ArgumentParser(description='Auctus A6 dumper')
     parser.add_argument('--begin', type=lambda x: int(x,0),
                         help='begin address default 0x82000000',
